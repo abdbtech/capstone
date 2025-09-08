@@ -94,7 +94,7 @@ def ftp_to_df(ftp_full_url, **kwargs):
     
 
 
-# Database connection. Right now this is on portia, update to fabian when we can
+# Database connection using psycopg2. Use for direct queries
 def connection(test=False):
     """Create a database connection"""
     try:
@@ -115,7 +115,7 @@ def connection(test=False):
         print(f"Connection failed: {e}")
         return None
     
-
+# SQLAlchemy engine for pandas and ORM use
 def engine():
     """Create a SQLAlchemy database engine"""
     try:
@@ -127,7 +127,7 @@ def engine():
         print(f"Engine creation failed: {e}")
         return None
     
-
+# easy query function to return a dataframe, generates engine internally
 def query(sql, params=None):
     """
     Runs a SQL query and returns the results as a DF
