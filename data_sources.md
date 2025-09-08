@@ -102,6 +102,12 @@ datasets explored further
 https://www.ncei.noaa.gov/access/billions/
 
 
+## Census comunity resiliance estimates ##
+
+https://www.census.gov/programs-surveys/community-resilience-estimates/data/datasets.html
+
+
+
 ### In SQL and tested ###
 
 1. FEMA NRI
