@@ -3,7 +3,7 @@
 Load NRI (National Risk Index) data into PostgreSQL database
 for the Disaster Response Capstone Project
 """
-
+import ignore.global_vars as gv
 from data.database_setup import load_nri_shapefile, setup_project_schema
 import os
 
@@ -12,8 +12,7 @@ def main():
     
     # Common download locations - update these paths as needed
     possible_paths = [
-        r"C:\Users\alben\Downloads\NRI_Shapefile_Counties.zip",
-        r"C:\Downloads\NRI_Shapefile_Counties.zip", 
+        gv.DATA_PATHS["nri_shapefile"],
         r".\data\NRI_Shapefile_Counties.zip",
         # Add your actual download path here
     ]

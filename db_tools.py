@@ -6,7 +6,7 @@ import pandas as pd
 import ftplib
 import os
 from urllib.parse import urlparse
-import global_vars as gv
+import ignore.global_vars as gv
 
 
 
