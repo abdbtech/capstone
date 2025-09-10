@@ -169,3 +169,13 @@ def load_data(data_source, table_name, schema=None, if_exists='replace', **kwarg
             print(f"Data loaded successfully into {table_name}")
         except Exception as e:
             print(f"Error loading data: {e}")
+
+# tool for dropping tables as needed
+def drop_table(table_name):
+    conn = connection()
+    cursor = conn.cursor()
+    cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"Dropped table {table_name} if it existed.")
