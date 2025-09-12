@@ -179,3 +179,24 @@ def drop_table(table_name):
     cursor.close()
     conn.close()
     print(f"Dropped table {table_name} if it existed.")
+
+# More general tool for executing arbitrary SQL commands
+def execute_sql(sql):
+    """
+    Execute SQL command (for CREATE, DROP, ALTER, etc.)
+    ARGS:
+        sql (str): SQL command to execute
+    """
+    conn = connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            conn.commit()
+            cursor.close()
+            conn.close()
+            print("SQL executed successfully")
+        except Exception as e:
+            print(f"Error executing SQL: {e}")
+            if conn:
+                conn.close()
