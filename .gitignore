@@ -3,3 +3,4 @@ ignore/
 *.log
 __pycache__/
 .env
+qgis_exports/
