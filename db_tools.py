@@ -141,6 +141,7 @@ def query(sql, params=None):
     if eng:
         try:
             df = pd.read_sql_query(sql, eng, params=params)
+            print(f"Query executed successfully, returned {len(df)} rows")
             return df
         except Exception as e:
             print(f"Error executing query: {e}")
