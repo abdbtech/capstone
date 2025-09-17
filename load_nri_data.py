@@ -29,7 +29,7 @@ def main():
             break
     
     if not nri_file:
-        print("✗ NRI shapefile not found in common locations.")
+        print("NRI shapefile not found in common locations.")
         print("\nPlease download from: https://www.fema.gov/flood-maps/products-tools/national-risk-index")
         print("Or enter the path manually:")
         nri_file = input("Enter path to NRI shapefile (ZIP or .shp): ").strip()
@@ -42,7 +42,7 @@ def main():
     success = load_nri_shapefile(nri_file, 'raw_data.nri_counties')
     
     if success:
-        print("\n🎉 NRI data loaded successfully!")
+        print("\n NRI data loaded successfully!")
         print("\nYour disaster response database now contains:")
         print("  - Table: raw_data.nri_counties (National Risk Index data)")
         print("  - Geographic data for risk analysis and modeling")
