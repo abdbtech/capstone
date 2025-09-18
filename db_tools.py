@@ -7,6 +7,9 @@ import ftplib
 import os
 from urllib.parse import urlparse
 import ignore.global_vars as gv
+import geopandas as gpd
+from shapely import wkt
+import numpy as np
 
 
 
@@ -201,3 +204,149 @@ def execute_sql(sql):
             print(f"Error executing SQL: {e}")
             if conn:
                 conn.close()
+
+def prepare_spatial_data_for_qgis(
+    dataframe,
+    geometry_source="nri_shapefile",
+    data_columns=None,
+    county_fips_col="county_fips",
+    impute_missing=True,
+    add_rounded_cols=True,
+):
+    """
+    Prepare spatial data for QGIS mapping by handling coordinate transformations and data merging.
+
+    Parameters:
+    -----------
+    dataframe : pd.DataFrame
+        DataFrame containing the data to be spatially enabled
+    geometry_source : str
+        Source of geometry data ('nri_shapefile' or 'existing_spatial_table')
+    data_columns : list
+        List of columns to include from input dataframe (if None, includes all)
+    county_fips_col : str
+        Name of the county FIPS column for joining
+    impute_missing : bool
+        Whether to impute missing values using state averages
+    add_rounded_cols : bool
+        Whether to add rounded versions of numeric columns for QGIS display
+
+    Returns:
+    --------
+    tuple: (spatial_dataframe, geometry_wkt_dataframe)
+        - spatial_dataframe: GeoDataFrame ready for analysis
+        - geometry_wkt_dataframe: DataFrame with WKT geometry for database storage
+    """
+
+    if geometry_source == "nri_shapefile":
+        # Load NRI shapefile data and convert coordinates
+        print("Loading NRI shapefile data...")
+        nri_gdf = query("""
+            SELECT 
+                "STCOFIPS" as county_fips,
+                ST_AsText("geometry") as geometry_wkt,
+                "TRACTFIPS" as tract_geoid,
+                "POPULATION",
+                "RISK_SCORE"
+            FROM nri_shape_census_tracts
+            WHERE "geometry" IS NOT NULL
+            AND "STCOFIPS" IS NOT NULL
+        """)
+
+        if len(nri_gdf) == 0:
+            raise ValueError("No NRI shapefile data available")
+
+        print(f"Loaded {len(nri_gdf)} census tracts")
+
+        # Convert WKT to geometries for processing
+        nri_gdf["geometry"] = nri_gdf["geometry_wkt"].apply(wkt.loads)
+        nri_gdf = gpd.GeoDataFrame(nri_gdf, geometry="geometry")
+
+        # Aggregate to county level
+        print("Aggregating to county boundaries...")
+        county_boundaries = nri_gdf.dissolve(by="county_fips").reset_index()
+        county_boundaries = county_boundaries[["county_fips", "geometry"]]
+
+    elif geometry_source == "existing_spatial_table":
+        # This would handle the coordinate correction case
+        print("Using existing spatial table with coordinate correction...")
+        # Note: This path would be implemented when we have an existing spatial table
+        # that needs coordinate system correction
+        raise NotImplementedError("Existing spatial table source not yet implemented")
+
+    else:
+        raise ValueError(f"Unknown geometry_source: {geometry_source}")
+
+    # Prepare data columns
+    if data_columns is None:
+        data_columns = list(dataframe.columns)
+
+    # Ensure county_fips_col is included
+    if county_fips_col not in data_columns:
+        data_columns.append(county_fips_col)
+
+    # Merge with input data
+    print("Merging with input data...")
+    spatial_data = county_boundaries.merge(
+        dataframe[data_columns],
+        left_on="county_fips",
+        right_on=county_fips_col,
+        how="left",
+    )
+
+    # Handle missing data imputation
+    if impute_missing:
+        print("Imputing missing values using state averages...")
+        spatial_data["state_fips"] = spatial_data["county_fips"].str[:2]
+
+        # Identify numeric columns for imputation (excluding ID columns)
+        numeric_cols = spatial_data.select_dtypes(include=[np.number]).columns
+        exclude_cols = ["county_fips", "state_fips"]
+        impute_cols = [col for col in numeric_cols if col not in exclude_cols]
+
+        for col in impute_cols:
+            if spatial_data[col].isnull().any():
+                # Calculate state averages
+                state_avg = spatial_data.groupby("state_fips")[col].mean()
+                # Fill missing values with state averages
+                spatial_data[col] = spatial_data[col].fillna(
+                    spatial_data["state_fips"].map(state_avg)
+                )
+                # Fill any remaining nulls with overall mean
+                overall_mean = spatial_data[col].mean()
+                spatial_data[col] = spatial_data[col].fillna(overall_mean)
+
+    # Add rounded columns for better QGIS display
+    if add_rounded_cols:
+        numeric_cols = spatial_data.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            if col not in ["county_fips", "state_fips"] and not col.endswith(
+                "_rounded"
+            ):
+                # Determine appropriate rounding based on magnitude
+                col_values = spatial_data[col].dropna()
+                if len(col_values) > 0:
+                    max_val = col_values.abs().max()
+                    if max_val >= 1000:
+                        decimals = 0
+                    elif max_val >= 10:
+                        decimals = 1
+                    elif max_val >= 1:
+                        decimals = 2
+                    else:
+                        decimals = 3
+
+                    spatial_data[f"{col}_rounded"] = spatial_data[col].round(decimals)
+
+    print(f"Prepared {len(spatial_data)} counties with complete spatial data")
+
+    # Create WKT version for database storage
+    geometry_wkt_data = spatial_data.copy()
+    geometry_wkt_data["geometry_wkt"] = geometry_wkt_data["geometry"].apply(
+        lambda x: x.wkt
+    )
+
+    # Drop the geometry column for database storage
+    db_data = geometry_wkt_data.drop("geometry", axis=1)
+
+    return spatial_data, db_data
