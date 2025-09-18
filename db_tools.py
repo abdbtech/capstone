@@ -10,7 +10,7 @@ import ignore.global_vars as gv
 import geopandas as gpd
 from shapely import wkt
 import numpy as np
-import datetime
+from datetime import datetime
 
 
 def get_ftp_filenames(ftp_url, path):

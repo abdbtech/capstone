@@ -14,60 +14,49 @@ from scipy.stats import weibull_min
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime
-from scipy.stats import weibull_min
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-from datetime import datetime
 
-# NOTE: Set to True if a full rebuild is required, set to False to skip table builds. Search 'REBUILD' to see which sections are effected.
-REBUILD = True
 # change n_depots to change number of clusters
 n_depots = 36
 
+if __name__ == "__main__":
+    '''
+    FEMA NRI Data pipeline. 
+    Retrieves path from global_vars.py (gv), unzips into target directory specified
+    by gv and loads shape files into postgis database tables. 
+    '''
 
-'''
-FEMA NRI Data pipeline. 
-Retrieves path from global_vars.py (gv), unzips into target directory specified
-by gv and loads shape files into postgis database tables. 
-'''
+    dbt.print_section_start("FEMA NRI Data Pipeline", "Extracting and loading NRI shapefiles to PostGIS")
 
-dbt.print_section_start("FEMA NRI Data Pipeline", "Extracting and loading NRI shapefiles to PostGIS")
-
-if REBUILD:
     # Database connection setup
     dbt.connection(test=True)
     dbt.engine()
-# Unzip the shapefile components
+    # Unzip the shapefile components
     zip_path = gv.DATA_PATHS["nri_shapefile"]
     extract_dir = gv.DATA_PATHS["extract_dir"]
     os.makedirs(extract_dir, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(extract_dir)
-# Extract .shp file path
+    # Extract .shp file path
     shp_path = os.path.join(extract_dir, "NRI_Shapefile_CensusTracts.shp")
 
-# Load shapefile
+    # Load shapefile
     dbt.print_status("Loading shapefile to PostGIS database...")
     gdf = gpd.read_file(shp_path)
     gdf.to_postgis(name="nri_shape_census_tracts", con=dbt.engine(), if_exists="replace")
-    print_section_complete("FEMA NRI Data Pipeline", f"Loaded {len(gdf)} census tract records to nri_shape_census_tracts")
-else:
-    dbt.print_status("Table - nri_shape_census_tracts - Rebuild skipped", "SKIP")
-    print_section_complete("FEMA NRI Data Pipeline", "Skipped - REBUILD=False")
+    dbt.print_section_complete("FEMA NRI Data Pipeline", f"Loaded {len(gdf)} census tract records to nri_shape_census_tracts")
 
-'''
-NOAA Storm Data Pipeline.
-Retrieves list of csv files from FTP and creates list covering 1999-2024
-download and concat all files in list
+    '''
+    NOAA Storm Data Pipeline.
+    Retrieves list of csv files from FTP and creates list covering 1999-2024
+    download and concat all files in list
 
-'''
+    '''
 
-dbt.print_section_start("NOAA Storm Data Pipeline", "Processing storm events data from NCEI FTP (1999-2024)")
+    dbt.print_section_start("NOAA Storm Data Pipeline", "Processing storm events data from NCEI FTP (1999-2024)")
 
-# Get file list where type is StormEvents_details and year is 1999-2024. 2025 excluded as it is incomplete as of 10SEP2025
-if REBUILD:
+    # Get file list where type is StormEvents_details and year is 1999-2024. 2025 excluded as it is incomplete as of 10SEP2025
     files = dbt.get_ftp_filenames(
-        "ftp://ftp.ncei.noaa.gov", "/pub/data/swdi/stormevents/csvfiles/"
+    "ftp://ftp.ncei.noaa.gov", "/pub/data/swdi/stormevents/csvfiles/"
     )
 
     # Filter for StormEvents_details files from 1999-2025
@@ -147,210 +136,214 @@ if REBUILD:
         else:
             print("No data was successfully loaded")
 
-else:
-    dbt.print_status("NOAA Storm table rebuild skipped", "SKIP")
+    dbt.print_section_complete("NOAA Storm Data Pipeline", f"Processed storm events data covering years 1999-2024")
 
-dbt.print_section_complete("NOAA Storm Data Pipeline", f"Processed storm events data covering years 1999-2024")
+    # Data processing pipeline
+    dbt.print_status("Starting NOAA data processing pipeline...")
 
-# Data processing pipeline
-dbt.print_status("Starting NOAA data processing pipeline...")
+    # Drop unneeded columns to reduce memory usage
+    # Keeping injuries and deaths for severity analysis
+    dbt.print_status("Filtering columns and processing dates...")
+    df_all_storms_drop = df_all_storms[['BEGIN_YEARMONTH', 'BEGIN_DAY', 'EPISODE_ID', 'EVENT_ID', 'EVENT_TYPE', 'CZ_FIPS', 'STATE_FIPS', 'INJURIES_DIRECT', 'INJURIES_INDIRECT', 'DEATHS_DIRECT', 'DEATHS_INDIRECT', 'DAMAGE_PROPERTY']]
+    df_all_storms_drop.head()
 
-# Drop unneeded columns to reduce memory usage
-# Keeping injuries and deaths for severity analysis
-dbt.print_status("Filtering columns and processing dates...")
-df_all_storms_drop = df_all_storms[['BEGIN_YEARMONTH', 'BEGIN_DAY', 'EPISODE_ID', 'EVENT_ID', 'EVENT_TYPE', 'CZ_FIPS', 'STATE_FIPS', 'INJURIES_DIRECT', 'INJURIES_INDIRECT', 'DEATHS_DIRECT', 'DEATHS_INDIRECT', 'DAMAGE_PROPERTY']]
-df_all_storms_drop.head()
+    # combine BEGIN_YEARMONTH and BEGIN_DAY into a single DATE column and convert to datetime, drop original columns
+    # create YEAR column for filtering later
 
-# combine BEGIN_YEARMONTH and BEGIN_DAY into a single DATE column and convert to datetime, drop original columns
-# create YEAR column for filtering later
+    df_all_storms_comb = df_all_storms_drop.copy()
 
-df_all_storms_comb = df_all_storms_drop.copy()
+    df_all_storms_comb['BEGIN_YEARMONTH'] = df_all_storms_comb['BEGIN_YEARMONTH'].astype(str)
+    df_all_storms_comb['BEGIN_DAY'] = df_all_storms_comb['BEGIN_DAY'].astype(str).str.zfill(2)
+    df_all_storms_comb['DATE']= df_all_storms_comb['BEGIN_YEARMONTH'] + df_all_storms_comb['BEGIN_DAY']
+    df_all_storms_comb['DATE'] = pd.to_datetime(df_all_storms_comb['DATE'], format='%Y%m%d')
+    df_all_storms_comb.drop(columns=['BEGIN_YEARMONTH', 'BEGIN_DAY'], inplace=True)
+    df_all_storms_comb['YEAR'] = df_all_storms_comb['DATE'].dt.year
+    df_all_storms_comb.head()
 
-df_all_storms_comb['BEGIN_YEARMONTH'] = df_all_storms_comb['BEGIN_YEARMONTH'].astype(str)
-df_all_storms_comb['BEGIN_DAY'] = df_all_storms_comb['BEGIN_DAY'].astype(str).str.zfill(2)
-df_all_storms_comb['DATE']= df_all_storms_comb['BEGIN_YEARMONTH'] + df_all_storms_comb['BEGIN_DAY']
-df_all_storms_comb['DATE'] = pd.to_datetime(df_all_storms_comb['DATE'], format='%Y%m%d')
-df_all_storms_comb.drop(columns=['BEGIN_YEARMONTH', 'BEGIN_DAY'], inplace=True)
-df_all_storms_comb['YEAR'] = df_all_storms_comb['DATE'].dt.year
-df_all_storms_comb.head()
-
-# combine state and county fips into a single high level FIPS. handle NA with convention of 99999 as unknown county
-# keep original columns in case needed.
-df_all_storms_comb["STATE_FIPS"] = (
-    pd.to_numeric(df_all_storms_comb["STATE_FIPS"], errors="coerce")
-    .fillna(99)
-    .astype(int)
-    .astype(str)
-    .str.zfill(2)
-)
-df_all_storms_comb["CZ_FIPS"] = (
-    pd.to_numeric(df_all_storms_comb["CZ_FIPS"], errors="coerce")
-    .fillna(999)
-    .astype(int)
-    .astype(str)
-    .str.zfill(3)
-)
-df_all_storms_comb["CO_FIPS"] = (
-    df_all_storms_comb["STATE_FIPS"] + df_all_storms_comb["CZ_FIPS"]
-)
-
-
-# clean FIPS due to historical changes and non populated areas (marine, unincorporated, etc)
-
-df_clean = df_all_storms_comb.copy()
-df_clean = df_clean[
-(df_clean['CO_FIPS'] >= '01001') & 
-(df_clean['CO_FIPS'] <= '56045') &
-(~df_clean['CO_FIPS'].str.startswith('99'))
-].copy()
-
-# Filter data to only include events with direct and indirect deaths or injuries
-severe_events = df_clean[
-    (df_clean["DEATHS_DIRECT"] > 0)
-    | (df_clean["INJURIES_DIRECT"] > 0)
-    | (df_clean["DEATHS_INDIRECT"] > 0)
-    | (df_clean["INJURIES_INDIRECT"] > 0)
-].copy()
-
-# Group by episode and county fips to get unique events
-dbt.print_status("Grouping events by county and episode...")
-county_episodes = (
-    severe_events.groupby(["CO_FIPS", "EPISODE_ID", "YEAR"])
-    .agg(
-        {
-            "DEATHS_DIRECT": "sum",
-            "DEATHS_INDIRECT": "sum",
-            "INJURIES_INDIRECT": "sum",
-            "INJURIES_DIRECT": "sum",
-            "EVENT_TYPE": lambda x: ", ".join(sorted(set(x))),
-            "DATE": "first",
-        }
+    # combine state and county fips into a single high level FIPS. handle NA with convention of 99999 as unknown county
+    # keep original columns in case needed.
+    df_all_storms_comb["STATE_FIPS"] = (
+        pd.to_numeric(df_all_storms_comb["STATE_FIPS"], errors="coerce")
+        .fillna(99)
+        .astype(int)
+        .astype(str)
+        .str.zfill(2)
     )
-    .reset_index()
-)
-
-# Aggregate by county-year with both count and other metrics
-dbt.print_status("Creating annual county-level aggregations...")
-annual_episodes = (
-    county_episodes.groupby(["CO_FIPS", "YEAR"])
-    .agg(
-        {
-            "EPISODE_ID": "count",  # This gives us the event_count
-            "DEATHS_DIRECT": "sum",
-            "DEATHS_INDIRECT": "sum",
-            "INJURIES_DIRECT": "sum",
-            "INJURIES_INDIRECT": "sum",
-            "EVENT_TYPE": lambda x: ", ".join(sorted(set(x))),
-            "DATE": "first",
-        }
+    df_all_storms_comb["CZ_FIPS"] = (
+        pd.to_numeric(df_all_storms_comb["CZ_FIPS"], errors="coerce")
+        .fillna(999)
+        .astype(int)
+        .astype(str)
+        .str.zfill(3)
     )
-    .reset_index()
-)
+    df_all_storms_comb["CO_FIPS"] = (
+        df_all_storms_comb["STATE_FIPS"] + df_all_storms_comb["CZ_FIPS"]
+    )
 
-# Rename columns to match your existing structure
-annual_episodes.columns = [
-    "county_fips",
-    "year",
-    "event_count",
-    "total_deaths_direct",
-    "total_deaths_indirect",
-    "total_injuries_direct",
-    "total_injuries_indirect",
-    "event_types",
-    "first_event_date",
-]
 
-# Create complete county-year combinations for counties that had at least one severe event
-all_counties = annual_episodes["county_fips"].unique()
-all_years = range(annual_episodes["year"].min(), annual_episodes["year"].max() + 1)
+    # clean FIPS due to historical changes and non populated areas (marine, unincorporated, etc)
 
-# Create all combinations
-complete_combinations = pd.MultiIndex.from_product(
-    [all_counties, all_years], names=["county_fips", "year"]
-).to_frame(index=False)
+    df_clean = df_all_storms_comb.copy()
+    df_clean = df_clean[
+    (df_clean['CO_FIPS'] >= '01001') & 
+    (df_clean['CO_FIPS'] <= '56045') &
+    (~df_clean['CO_FIPS'].str.startswith('99'))
+    ].copy()
 
-# Merge and fill missing with 0 for numeric columns, empty string for text columns
-annual_episodes = complete_combinations.merge(
-    annual_episodes, on=["county_fips", "year"], how="left"
-).fillna(
-    {
-        "event_count": 0,
-        "total_deaths_direct": 0,
-        "total_deaths_indirect": 0,
-        "total_injuries_direct": 0,
-        "total_injuries_indirect": 0,
-        "event_types": "",
-        "first_event_date": pd.NaT,
-    }
-)
+    # Filter data to only include events with direct and indirect deaths or injuries
+    severe_events = df_clean[
+        (df_clean["DEATHS_DIRECT"] > 0)
+        | (df_clean["INJURIES_DIRECT"] > 0)
+        | (df_clean["DEATHS_INDIRECT"] > 0)
+        | (df_clean["INJURIES_INDIRECT"] > 0)
+    ].copy()
 
-annual_episodes[
-    [
+    # Group by episode and county fips to get unique events
+    dbt.print_status("Grouping events by county and episode...")
+    county_episodes = (
+        severe_events.groupby(["CO_FIPS", "EPISODE_ID", "YEAR"])
+        .agg(
+            {
+                "DEATHS_DIRECT": "sum",
+                "DEATHS_INDIRECT": "sum",
+                "INJURIES_INDIRECT": "sum",
+                "INJURIES_DIRECT": "sum",
+                "EVENT_TYPE": lambda x: ", ".join(sorted(set(x))),
+                "DATE": "first",
+            }
+        )
+        .reset_index()
+    )
+
+    # Aggregate by county-year with both count and other metrics
+    dbt.print_status("Creating annual county-level aggregations...")
+    annual_episodes = (
+        county_episodes.groupby(["CO_FIPS", "YEAR"])
+        .agg(
+            {
+                "EPISODE_ID": "count",  # This gives us the event_count
+                "DEATHS_DIRECT": "sum",
+                "DEATHS_INDIRECT": "sum",
+                "INJURIES_DIRECT": "sum",
+                "INJURIES_INDIRECT": "sum",
+                "EVENT_TYPE": lambda x: ", ".join(sorted(set(x))),
+                "DATE": "first",
+            }
+        )
+        .reset_index()
+    )
+
+    # Rename columns to match your existing structure
+    annual_episodes.columns = [
+        "county_fips",
+        "year",
         "event_count",
         "total_deaths_direct",
         "total_deaths_indirect",
         "total_injuries_direct",
         "total_injuries_indirect",
+        "event_types",
+        "first_event_date",
     ]
-] = annual_episodes[
-    [
-        "event_count",
-        "total_deaths_direct",
-        "total_deaths_indirect",
-        "total_injuries_direct",
-        "total_injuries_indirect",
-    ]
-].astype(int)
+
+    # Create complete county-year combinations for counties that had at least one severe event
+    all_counties = annual_episodes["county_fips"].unique()
+    all_years = range(annual_episodes["year"].min(), annual_episodes["year"].max() + 1)
+
+    # Create all combinations
+    complete_combinations = pd.MultiIndex.from_product(
+        [all_counties, all_years], names=["county_fips", "year"]
+    ).to_frame(index=False)
+
+    # Merge and fill missing with 0 for numeric columns, empty string for text columns
+    annual_episodes = complete_combinations.merge(
+        annual_episodes, on=["county_fips", "year"], how="left"
+    ).fillna(
+        {
+            "event_count": 0,
+            "total_deaths_direct": 0,
+            "total_deaths_indirect": 0,
+            "total_injuries_direct": 0,
+            "total_injuries_indirect": 0,
+            "event_types": "",
+            "first_event_date": pd.NaT,
+        }
+    )
+
+    annual_episodes[
+        [
+            "event_count",
+            "total_deaths_direct",
+            "total_deaths_indirect",
+            "total_injuries_direct",
+            "total_injuries_indirect",
+        ]
+    ] = annual_episodes[
+        [
+            "event_count",
+            "total_deaths_direct",
+            "total_deaths_indirect",
+            "total_injuries_direct",
+            "total_injuries_indirect",
+        ]
+    ].astype(int)
 
 
-# load dfs to db
-if REBUILD:
+    # load dfs to db
+
     dbt.load_data(annual_episodes, "NOAA_STORM_EPISODES", if_exists="replace")
     dbt.load_data(df_clean, "NOAA_STORM_EVENTS", if_exists="replace")
-else:
-    print("Table - NOAA_STORM_EVENTS - loading skipped")
 
+    '''
+    US Census Community-resliliance data pipeline
+    '''
+    # load CSV from local file path in gv
+    df = pd.read_csv(gv.DATA_PATHS["census_resilience"], encoding="latin-1")
 
-'''
-US Census Community-resliliance data pipeline
+    # filter so only GEO_LEVEL == 'County' remain 
+    # and strip all by last 5 from GEO_ID
+    # to ensure correct FIPS length
+    df = df.copy()
+    df = df[df["GEO_LEVEL"] == "County"]
+    df = df.reset_index(drop=True)
+    df["County_fips"] = df["GEO_ID"].str[-5:]
 
-
-'''
-# load CSV from local file path in gv
-df = pd.read_csv(gv.DATA_PATHS["census_resilience"], encoding="latin-1")
-
-# Check TRACT field lengths for conversion
-df = df.copy()
-df["TRACT"] = df["TRACT"].astype(str)
-df["TRACT"].str.len().describe()
-
-# filter so only GEO_LEVEL == 'County' remain 
-# and strip all by last 5 from GEO_ID
-# to ensure correct FIPS length
-df = df.copy()
-df = df[df["GEO_LEVEL"] == "County"]
-df = df.reset_index(drop=True)
-df["County_fips"] = df["GEO_ID"].str[-5:]
-
-# Drop unneeded cols
-df = df[
-    [
-        "County_fips",
-        "GEO_ID",
-        "GEO_LEVEL",
-        "WATER_TRACT",
-        "POPUNI",
-        "PRED12_PE",
-        "PRED3_PE",
+    # Drop unneeded cols
+    df = df[
+        [
+            "County_fips",
+            "GEO_ID",
+            "GEO_LEVEL",
+            "WATER_TRACT",
+            "POPUNI",
+            "PRED12_PE",
+            "PRED3_PE",
+        ]
     ]
-]
 
-# load into db
-if REBUILD:
+    # load into db
+
     dbt.print_status("Loading census resilience data to database...")
     dbt.load_data(df, "census_resilience", if_exists="replace")
-    print_section_complete("US Census Resilience Pipeline", f"Loaded {len(df)} county records to census_resilience")
-else:
-    dbt.print_status("rebuild table -census_resilience -skipped", "SKIP")
-    print_section_complete("US Census Resilience Pipeline", "Skipped - REBUILD=False")
+    dbt.print_section_complete("US Census Resilience Pipeline", f"Loaded {len(df)} county records to census_resilience")
+
+    # Prompt to run model.py
+    print("\n" + "="*60)
+    print("ETL pipeline completed successfully!")
+    print("="*60)
+
+    response = input("\nWould you like to run the risk modeling pipeline (model.py)? (Y/N): ").strip().upper()
+    if response == 'Y':
+        print("Starting risk modeling pipeline...")
+        import subprocess
+        import sys
+        try:
+            subprocess.run([sys.executable, "model.py"], check=True)
+            print("Risk modeling pipeline completed successfully!")
+        except subprocess.CalledProcessError as e:
+            print(f"Error running model.py: {e}")
+        except FileNotFoundError:
+            print("model.py not found in current directory")
+    else:
+        print("Skipping risk modeling pipeline.")
 
