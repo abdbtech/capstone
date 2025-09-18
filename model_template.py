@@ -21,14 +21,9 @@ from datetime import datetime
 
 # NOTE: Set to True if a full rebuild is required, set to False to skip table builds. Search 'REBUILD' to see which sections are effected.
 REBUILD = True
-# change n_depots to change number of clusters
-n_depots = 36
-
 
 '''
 FEMA NRI Data pipeline. 
-Retrieves path from global_vars.py (gv), unzips into target directory specified
-by gv and loads shape files into postgis database tables. 
 '''
 
 dbt.print_section_start("FEMA NRI Data Pipeline", "Extracting and loading NRI shapefiles to PostGIS")
@@ -50,16 +45,13 @@ if REBUILD:
     dbt.print_status("Loading shapefile to PostGIS database...")
     gdf = gpd.read_file(shp_path)
     gdf.to_postgis(name="nri_shape_census_tracts", con=dbt.engine(), if_exists="replace")
-    print_section_complete("FEMA NRI Data Pipeline", f"Loaded {len(gdf)} census tract records to nri_shape_census_tracts")
+    dbt.print_section_complete("FEMA NRI Data Pipeline", f"Loaded {len(gdf)} census tract records to nri_shape_census_tracts")
 else:
     dbt.print_status("Table - nri_shape_census_tracts - Rebuild skipped", "SKIP")
-    print_section_complete("FEMA NRI Data Pipeline", "Skipped - REBUILD=False")
+    dbt.print_section_complete("FEMA NRI Data Pipeline", "Skipped - REBUILD=False")
 
 '''
 NOAA Storm Data Pipeline.
-Retrieves list of csv files from FTP and creates list covering 1999-2024
-download and concat all files in list
-
 '''
 
 dbt.print_section_start("NOAA Storm Data Pipeline", "Processing storm events data from NCEI FTP (1999-2024)")
@@ -313,8 +305,6 @@ else:
 
 '''
 US Census Community-resliliance data pipeline
-
-
 '''
 # load CSV from local file path in gv
 df = pd.read_csv(gv.DATA_PATHS["census_resilience"], encoding="latin-1")
@@ -349,8 +339,21 @@ df = df[
 if REBUILD:
     dbt.print_status("Loading census resilience data to database...")
     dbt.load_data(df, "census_resilience", if_exists="replace")
-    print_section_complete("US Census Resilience Pipeline", f"Loaded {len(df)} county records to census_resilience")
+    dbt.print_section_complete("US Census Resilience Pipeline", f"Loaded {len(df)} county records to census_resilience")
 else:
     dbt.print_status("rebuild table -census_resilience -skipped", "SKIP")
-    print_section_complete("US Census Resilience Pipeline", "Skipped - REBUILD=False")
+    dbt.print_section_complete("US Census Resilience Pipeline", "Skipped - REBUILD=False")
 
+print("ETL Pipeline Complete")
+
+# Ask user if they want to continue with modeling
+print("\n" + "="*60)
+user_choice = input("Continue with modeling? (Y/N): ").strip().upper()
+
+if user_choice == 'Y':
+    print("Proceeding to modeling phase...")
+    # Import and run the modeling script
+    import model
+else:
+    print("ETL process completed. Modeling phase skipped.")
+    print("To run modeling later, execute: python model.py")

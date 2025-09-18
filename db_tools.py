@@ -10,7 +10,7 @@ import ignore.global_vars as gv
 import geopandas as gpd
 from shapely import wkt
 import numpy as np
-
+import datetime
 
 
 def get_ftp_filenames(ftp_url, path):
@@ -350,3 +350,29 @@ def prepare_spatial_data_for_qgis(
     db_data = geometry_wkt_data.drop("geometry", axis=1)
 
     return spatial_data, db_data
+
+
+# Status messaging functions
+def print_section_start(section_name, description=""):
+    """Print a formatted section start message with timestamp"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n{'=' * 60}")
+    print(f"[{timestamp}] STARTING: {section_name}")
+    if description:
+        print(f"Description: {description}")
+    print(f"{'=' * 60}")
+
+
+def print_section_complete(section_name, details=""):
+    """Print a formatted section completion message with timestamp"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n[{timestamp}] ✓ COMPLETED: {section_name}")
+    if details:
+        print(f"Result: {details}")
+    print(f"{'-' * 40}")
+
+
+def print_status(message, level="INFO"):
+    """Print a status message with timestamp"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {level}: {message}")
