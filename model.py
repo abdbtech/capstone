@@ -12,14 +12,13 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
+
+# NOTE: Set to True if a full rebuild is required, set to False to skip table builds. Search 'REBUILD' to see which sections are effected.
+REBUILD = True
+# change n_depots to change number of clusters
+n_depots = 36
+
 if __name__ == "__main__":
-
-    # NOTE: Set to True if a full rebuild is required, set to False to skip table builds. Search 'REBUILD' to see which sections are effected.
-    REBUILD = True
-    # change n_depots to change number of clusters
-    n_depots = 36
-
-
     """
     Compound Poisson Model
     Poisson, rate, component
@@ -155,7 +154,6 @@ if __name__ == "__main__":
         df_census, left_on="county_fips", right_on="County_fips", how="left"
     )
     noaa_census_full["state_fips"] = noaa_census_full["county_fips"].str[:2]
-    noaa_census_full.shape
 
     # Impute missing vulnerability data using state averages
     state_avg_mapping = state_vulnerability_avg.to_dict()
@@ -221,17 +219,6 @@ if __name__ == "__main__":
     weibull_params = weibull_min.fit(intensity_data, floc=0)
     weibull_shape, weibull_loc, weibull_scale = weibull_params
 
-    # Used scipy weibull_min for modeling "min extreme value" of derived "intensity"
-    # shape: k parameter describing skewedness
-    # scale: lambda parameter for spread
-    # location: shift parameter, locked at 0 for this implementation.
-    severity_distribution = {
-        "distribution": "weibull_min",
-        "shape": weibull_shape,
-        "scale": weibull_scale,
-        "location": weibull_loc,
-    }
-
     dbt.print_section_complete(
         "Weibull Severity Modeling",
         f"Fitted Weibull distribution (shape={weibull_shape:.3f}, scale={weibull_scale:.3f})",
@@ -286,6 +273,23 @@ if __name__ == "__main__":
         f"Completed Monte Carlo simulations for {len(county_risks)} counties",
     )
 
+    # After county_risks calculation, add:
+    risk_summary = []
+    for county_fips, risks in county_risks.items():
+        risk_summary.append({
+            'county_fips': county_fips,
+            'expected_annual_loss': np.mean(risks),
+            'var_95': np.percentile(risks, 95),
+            'var_99': np.percentile(risks, 99),
+            'std_dev': np.std(risks)
+            })
+        
+    disaster_risk_clusters = pd.DataFrame(risk_summary)
+    dbt.load_data(disaster_risk_clusters, "disaster_risk_clusters", if_exists="replace")
+
+    dbt.print_status(
+        f"Calculated risk statistics for {len(disaster_risk_clusters)} counties"
+    )
 
     """
     QGIS coordinates
@@ -333,7 +337,6 @@ if __name__ == "__main__":
             SELECT 
                 county_fips,
                 lambda_hat,
-                lambda_rounded,
                 prob_at_least_one_event,
                 total_events,
                 years_observed,
