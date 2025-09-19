@@ -1,5 +1,6 @@
 # import libraries
 # NOTE: global_vars should be edited to include local paths and credentials before use.
+import math
 import tqdm
 import numpy as np
 import pandas as pd
@@ -333,6 +334,10 @@ if __name__ == "__main__":
         "location": weibull_loc,
     }
 
+    '''
+    Compound Model Integration
+    '''
+
     def simulate_compound_poisson_risk(county_fips, n_simulations=10000):
         # Get county's λ (frequency)
         lambda_i = poisson_risk_params[poisson_risk_params["county_fips"] == county_fips][
@@ -615,6 +620,82 @@ if __name__ == "__main__":
 
     dbt.execute_sql(create_depot_spatial_sql)
 
+    '''
+    Create compound_poisson_map table for comprehensive risk metrics
+    '''
+
+    # Calculate expected severity from Weibull distribution
+    expected_severity = weibull_scale * math.gamma(1 + 1/weibull_shape)
+    print(f"Expected Weibull severity value: {expected_severity:.4f}")
+
+    # Create comprehensive risk metrics table
+    compound_poisson_map_sql = """
+    -- Create table combining all risk components for spatial mapping
+    DROP TABLE IF EXISTS compound_poisson_map;
+
+    CREATE TABLE compound_poisson_map AS
+    SELECT 
+        s.county_fips,
+        s.geometry,
+        -- Poisson frequency component
+        p.lambda_hat_rounded as poisson_frequency,
+        p.prob_at_least_one_event,
+        p.total_events,
+        p.years_observed,
+        -- Compound risk metrics
+        c.expected_annual_loss as compound_risk,
+        c.var_95 as risk_95th_percentile,
+        c.var_99 as risk_99th_percentile,
+        c.std_dev as risk_std_dev,
+        -- Severity component (constant across all counties from fitted distribution)
+        {} as expected_severity,
+        -- Risk ratios and rankings
+        PERCENT_RANK() OVER (ORDER BY c.expected_annual_loss) as risk_percentile_rank,
+        NTILE(10) OVER (ORDER BY c.expected_annual_loss) as risk_decile,
+        CASE 
+            WHEN c.expected_annual_loss >= (SELECT PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY expected_annual_loss) FROM disaster_risk_clusters) THEN 'Very High'
+            WHEN c.expected_annual_loss >= (SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY expected_annual_loss) FROM disaster_risk_clusters) THEN 'High'
+            WHEN c.expected_annual_loss >= (SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY expected_annual_loss) FROM disaster_risk_clusters) THEN 'Medium'
+            WHEN c.expected_annual_loss >= (SELECT PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY expected_annual_loss) FROM disaster_risk_clusters) THEN 'Low'
+            ELSE 'Very Low'
+        END as risk_category
+    FROM disaster_risk_counties_spatial_corrected s
+    JOIN disaster_risk_clusters c ON s.county_fips = c.county_fips
+    LEFT JOIN (
+        SELECT 
+            county_fips,
+            lambda_hat_rounded,
+            prob_at_least_one_event,
+            total_events,
+            years_observed
+        FROM disaster_risk_counties_spatial_corrected
+    ) p ON s.county_fips = p.county_fips
+    WHERE s.geometry IS NOT NULL;
+
+    -- Add spatial index
+    CREATE INDEX idx_compound_poisson_map_geom 
+    ON compound_poisson_map USING GIST (geometry);
+
+    -- Add primary key
+    ALTER TABLE compound_poisson_map 
+    ADD CONSTRAINT pk_compound_poisson_map PRIMARY KEY (county_fips);
+    """.format(expected_severity)
+
+    # Execute the SQL
+    dbt.execute_sql(compound_poisson_map_sql)
+
+    print("✓ Created compound_poisson_map table with:")
+    print("  - Poisson frequency (lambda_hat)")
+    print("  - Expected Weibull severity (constant)")
+    print("  - Compound Poisson risk (expected_annual_loss)")
+    print("  - Risk percentiles and categories")
+    print("  - Spatial geometries for QGIS mapping")
+
+    '''
+    Plotting and Summary for diagnostics
+
+    '''
+
     # Plot counties colored by service area
     plt.figure(figsize=(15, 10))
 
@@ -675,7 +756,7 @@ if __name__ == "__main__":
     plt.grid(True, alpha=0.3)
     plt.show()
 
-    print(f"\nModel Summary:")
+    print("\nModel Summary:")
     print(f"- Created {n_depots} strategic depot locations")
     print(
         f"- Average service radius: {service_stats_df['distance_to_depot_km'].mean():.1f} km"
