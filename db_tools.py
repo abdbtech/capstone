@@ -151,6 +151,7 @@ def query(sql, params=None):
             return pd.DataFrame()
     return pd.DataFrame()
 
+# Loads data into database
 def load_data(data_source, table_name, schema=None, if_exists='replace', **kwargs):
     """
     Load data from a source into a database table.
@@ -205,6 +206,45 @@ def execute_sql(sql):
             if conn:
                 conn.close()
 
+def prepare_spatial_data_for_qgis(dataframe, county_fips_col="county_fips"):
+    """
+    Simple function to add county geometry to dataframe for QGIS mapping.
+    """
+    # Load county boundaries
+    county_boundaries = query("""
+        SELECT 
+            "STCOFIPS" as county_fips,
+            ST_AsText(ST_Union("geometry")) as geometry_wkt
+        FROM nri_shape_census_tracts
+        WHERE "geometry" IS NOT NULL
+        GROUP BY "STCOFIPS"
+    """)
+    
+    if len(county_boundaries) == 0:
+        raise ValueError("No county boundary data available")
+    
+    # Merge with input data
+    spatial_data = county_boundaries.merge(
+        dataframe,
+        left_on="county_fips",
+        right_on=county_fips_col,
+        how="inner"  # Only keep counties with data
+    )
+    
+    print(f"Prepared {len(spatial_data)} counties with spatial data")
+    return spatial_data
+
+
+
+
+
+
+
+
+
+# hold for attempt to implement in model instead. 
+'''
+# prepares data for qgis loading
 def prepare_spatial_data_for_qgis(
     dataframe,
     geometry_source="nri_shapefile",
@@ -268,10 +308,7 @@ def prepare_spatial_data_for_qgis(
         county_boundaries = county_boundaries[["county_fips", "geometry"]]
 
     elif geometry_source == "existing_spatial_table":
-        # This would handle the coordinate correction case
         print("Using existing spatial table with coordinate correction...")
-        # Note: This path would be implemented when we have an existing spatial table
-        # that needs coordinate system correction
         raise NotImplementedError("Existing spatial table source not yet implemented")
 
     else:
@@ -299,7 +336,7 @@ def prepare_spatial_data_for_qgis(
         print("Imputing missing values using state averages...")
         spatial_data["state_fips"] = spatial_data["county_fips"].str[:2]
 
-        # Identify numeric columns for imputation (excluding ID columns)
+        # Identify numeric columns for imputation
         numeric_cols = spatial_data.select_dtypes(include=[np.number]).columns
         exclude_cols = ["county_fips", "state_fips"]
         impute_cols = [col for col in numeric_cols if col not in exclude_cols]
@@ -350,29 +387,4 @@ def prepare_spatial_data_for_qgis(
     db_data = geometry_wkt_data.drop("geometry", axis=1)
 
     return spatial_data, db_data
-
-
-# Status messaging functions
-def print_section_start(section_name, description=""):
-    """Print a formatted section start message with timestamp"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'=' * 60}")
-    print(f"[{timestamp}] STARTING: {section_name}")
-    if description:
-        print(f"Description: {description}")
-    print(f"{'=' * 60}")
-
-
-def print_section_complete(section_name, details=""):
-    """Print a formatted section completion message with timestamp"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[{timestamp}] ✓ COMPLETED: {section_name}")
-    if details:
-        print(f"Result: {details}")
-    print(f"{'-' * 40}")
-
-
-def print_status(message, level="INFO"):
-    """Print a status message with timestamp"""
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {level}: {message}")
+'''
