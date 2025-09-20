@@ -51,13 +51,6 @@ if __name__ == "__main__":
         inplace=True,
     )
 
-    # Calculate overdispersion ratio (variance/mean)
-    county_lambdas["overdispersion_ratio"] = np.where(
-        county_lambdas["lambda_hat"] > 0,
-        county_lambdas["variance"] / county_lambdas["lambda_hat"],
-        np.nan,
-    )
-
     # make a dataframe of the poisson risk parameters
     poisson_risk_params = county_lambdas[
         ["county_fips", "lambda_hat", "years_observed", "total_events"]
@@ -294,9 +287,10 @@ if __name__ == "__main__":
     )
 
     # Recalculate intensity with imputed vulnerability data
-    # Use POPUNI from census data, impute if missing using national average
-    national_avg_pop = df_census["POPUNI"].mean()
-    noaa_census_full["POPUNI_imputed"] = noaa_census_full["POPUNI"].fillna(national_avg_pop)
+    # Filter out counties with missing population data instead of imputing to avoid bias
+    print(f"Before filtering: {len(noaa_census_full)} county episodes")
+    noaa_census_full = noaa_census_full[noaa_census_full["POPUNI"].notna()]
+    print(f"After filtering missing population: {len(noaa_census_full)} county episodes")
 
     # Calculate casualties, casualty rate, vulnerability rate, and intensity
     noaa_census_full["casualties"] = (
@@ -307,7 +301,7 @@ if __name__ == "__main__":
     )
 
     noaa_census_full["casualty_rate"] = (
-        noaa_census_full["casualties"] / noaa_census_full["POPUNI_imputed"] * 1000
+        noaa_census_full["casualties"] / noaa_census_full["POPUNI"] * 1000
     )
     noaa_census_full["vulnerability_rate"] = (
         noaa_census_full["PRED12_PE_imputed"] + noaa_census_full["PRED3_PE_imputed"]
