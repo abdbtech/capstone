@@ -56,22 +56,6 @@ if __name__ == "__main__":
         ["county_fips", "lambda_hat", "years_observed", "total_events"]
     ].copy()
 
-    # Add confidence intervals for lambda estimates NOTE: not yet implemented, generating these in case we need them
-    poisson_risk_params["lambda_se"] = np.sqrt(
-        poisson_risk_params["lambda_hat"] / poisson_risk_params["years_observed"]
-    )
-    poisson_risk_params["lambda_ci_lower"] = (
-        poisson_risk_params["lambda_hat"] - 1.96 * poisson_risk_params["lambda_se"]
-    )
-    poisson_risk_params["lambda_ci_upper"] = (
-        poisson_risk_params["lambda_hat"] + 1.96 * poisson_risk_params["lambda_se"]
-    )
-
-    # set any negative lower CI bounds to zero
-    poisson_risk_params["lambda_ci_lower"] = np.maximum(
-        0, poisson_risk_params["lambda_ci_lower"]
-    )
-
     # calculate the probability of at least one event in a year
     # P(≥1 disaster) = 1 - e^(-λ)
     poisson_risk_params["prob_at_least_one_event"] = 1 - np.exp(
@@ -84,8 +68,6 @@ if __name__ == "__main__":
         "lambda_hat",
         "total_events",
         "years_observed",
-        "lambda_ci_lower",
-        "lambda_ci_upper",
         "prob_at_least_one_event"
     ]
     
@@ -116,8 +98,6 @@ if __name__ == "__main__":
             prob_at_least_one_event,
             total_events,
             years_observed,
-            lambda_ci_lower,
-            lambda_ci_upper,
             ST_GeomFromText(geometry_wkt, 4326) as geometry
         FROM disaster_risk_spatial;
 
@@ -137,7 +117,13 @@ if __name__ == "__main__":
         print(f"Error creating spatial data: {e}")
         print("No geographic data available")
 
-        # create table for disaster counts by county
+    """
+    Table for disaster count by type by county, used for QGIS overlay
+    """
+
+    # Create table with event counts per county
+    # This table is used for troubleshooting and future functionality
+    # or for county level historical disaster exploration
 
     event_types_sql = """
     SELECT DISTINCT "EVENT_TYPE" 
@@ -193,25 +179,19 @@ if __name__ == "__main__":
     ORDER BY s.county_fips;
     """
 
-    pivot_result = dbt.query(pivot_sql)
-
-    # Create table with event counts per county
-    # This table is used for troubleshooting and future functionality
-    # or for county level historical disaster exploration
-
     create_enhanced_table_sql = f"""
-    DROP TABLE IF EXISTS disaster_risk_counties_event_counts;
+    DROP TABLE IF EXISTS disasters_type_county;
 
-    CREATE TABLE disaster_risk_counties_event_counts AS
+    CREATE TABLE disasters_type_county AS
     {pivot_sql};
 
     -- Add indexes
-    CREATE INDEX idx_disaster_risk_event_counts_geom ON disaster_risk_counties_event_counts USING GIST (geometry);
-    ALTER TABLE disaster_risk_counties_event_counts ADD CONSTRAINT pk_disaster_risk_event_counts PRIMARY KEY (county_fips);
+    CREATE INDEX idx_disaster_risk_event_counts_geom ON disasters_type_county USING GIST (geometry);
+    ALTER TABLE disasters_type_county ADD CONSTRAINT pk_disaster_risk_event_counts PRIMARY KEY (county_fips);
     """
 
     dbt.execute_sql(create_enhanced_table_sql)
-    print("Enhanced table created: disaster_risk_counties_event_counts")
+    print("Enhanced table created: disasters_type_county")
 
 
     '''
@@ -220,33 +200,14 @@ if __name__ == "__main__":
 
     # Load tables from database
     df_noaa_episodes = dbt.query('SELECT * FROM "NOAA_STORM_EPISODES"')
-    df_noaa_events = dbt.query('SELECT * FROM "NOAA_STORM_EVENTS"')
     df_census = dbt.query('SELECT * FROM "census_resilience"')
 
-    # Generate casualty rate and merge noaa_episodes with census on county_fips
+    # Add casualty count to episodes data
     df_noaa_episodes["casualties"] = (
         df_noaa_episodes["total_injuries_direct"]
         + df_noaa_episodes["total_deaths_direct"]
         + df_noaa_episodes["total_injuries_indirect"]
         + df_noaa_episodes["total_deaths_indirect"]
-    )
-    noaa_episodes_census_merge = df_noaa_episodes.merge(
-        df_census, left_on="county_fips", right_on="County_fips"
-    )
-    noaa_episodes_census_merge["casualty_rate"] = (
-        noaa_episodes_census_merge["casualties"]
-        / noaa_episodes_census_merge["POPUNI"]
-        * 1000
-    )
-    noaa_census = noaa_episodes_census_merge.copy()
-    noaa_census[noaa_census["casualties"] > 1].describe()
-
-    # combine vunerabiliyt predictors with simple addition and create intensity rate.
-    # Multiplicative was chose for amplification effect of casualties on a vunerable population
-    # Intensity = casualty rate (per 1000) * 1 + (vunerability_rate /100)
-    noaa_census["vunerability_rate"] = noaa_census["PRED12_PE"] + noaa_census["PRED3_PE"]
-    noaa_census["intensity"] = noaa_census["casualty_rate"] * (
-        1 + (noaa_census["vunerability_rate"] / 100)
     )
 
     # Calculate state averages for vulnerability imputation
@@ -303,6 +264,7 @@ if __name__ == "__main__":
     noaa_census_full["casualty_rate"] = (
         noaa_census_full["casualties"] / noaa_census_full["POPUNI"] * 1000
     )
+    # label is misleading, PRED12_PE_imputed and PRED3_PE_imputed are an aggegate of actual PRED data and imputed data from counties missing these metric. 
     noaa_census_full["vulnerability_rate"] = (
         noaa_census_full["PRED12_PE_imputed"] + noaa_census_full["PRED3_PE_imputed"]
     )
@@ -321,15 +283,10 @@ if __name__ == "__main__":
     # shape: k parameter describing skewedness
     # scale: lambda parameter for spread
     # location: shift parameter, locked at 0 for this implementation.
-    severity_distribution = {
-        "distribution": "weibull_min",
-        "shape": weibull_shape,
-        "scale": weibull_scale,
-        "location": weibull_loc,
-    }
+    print(f"Fitted Weibull parameters: shape={weibull_shape:.4f}, scale={weibull_scale:.4f}, location={weibull_loc:.4f}")
 
     '''
-    Compound Model Integration
+    Compound Model Integration and Poisson calculation
     '''
 
     def simulate_compound_poisson_risk(county_fips, n_simulations=10000):
@@ -357,7 +314,7 @@ if __name__ == "__main__":
 
         return np.array(total_risks)
     
-    # Apply to all counties in your dataset
+    # Apply to all counties
     county_risks = {}
     for county in tqdm.tqdm(poisson_risk_params["county_fips"]):
         county_risks[county] = simulate_compound_poisson_risk(county)
@@ -395,8 +352,6 @@ if __name__ == "__main__":
         prob_at_least_one_event,
         total_events,
         years_observed,
-        lambda_ci_lower,
-        lambda_ci_upper,
         ST_Transform(ST_SetSRID(geometry, 3857), 4326) as geometry
     FROM disaster_risk_counties_spatial;
 
@@ -428,16 +383,6 @@ if __name__ == "__main__":
     county_data = dbt.query(county_geo_risk_query)
     print(f"Loaded {len(county_data)} counties with geographic and risk data")
 
-    # Data validation and cleaning
-    print("Data validation:")
-    print(
-        f"Latitude range: {county_data['latitude'].min():.3f} to {county_data['latitude'].max():.3f}"
-    )
-    print(
-        f"Longitude range: {county_data['longitude'].min():.3f} to {county_data['longitude'].max():.3f}"
-    )
-    print(f"NULL values: {county_data.isnull().sum().sum()}")
-
     # Filter out invalid coordinates
     valid_coords = (
         (county_data["latitude"] >= -90)
@@ -457,7 +402,6 @@ if __name__ == "__main__":
     geo_features_scaled = geo_scaler.fit_transform(geo_features)
 
     # set clusters are run, set at top with n_depots = 
-
     geo_kmeans = KMeans(n_clusters=n_depots, random_state=36, n_init=10)
     county_data_clean["depot_service_area"] = geo_kmeans.fit_predict(geo_features_scaled)
 
@@ -494,84 +438,13 @@ if __name__ == "__main__":
 
     depot_df = pd.DataFrame(depot_locations)
 
-    # Calculate service area statistics with error handling
-    def calculate_distance(lat1, lon1, lat2, lon2):
-        """Calculate distance between two points using geodesic distance with validation"""
-        try:
-            # Validate coordinates before calculation
-            if any(pd.isna([lat1, lon1, lat2, lon2])):
-                return np.nan
-            if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90):
-                return np.nan
-            if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180):
-                return np.nan
-
-            return geodesic((lat1, lon1), (lat2, lon2)).kilometers
-        except Exception as e:
-            print(f"Distance calculation error: {e}")
-            return np.nan
-
-
-    service_area_stats = []
-    for _, county in county_data_clean.iterrows():
-        depot_id = county["depot_service_area"]
-        depot_info = depot_df[depot_df["depot_id"] == depot_id].iloc[0]
-
-        distance = calculate_distance(
-            county["latitude"],
-            county["longitude"],
-            depot_info["latitude"],
-            depot_info["longitude"],
-        )
-
-        service_area_stats.append(
-            {
-                "county_fips": county["county_fips"],
-                "depot_id": depot_id,
-                "distance_to_depot_km": distance,
-                "county_risk": county["expected_annual_loss"],
-            }
-        )
-
-    service_stats_df = pd.DataFrame(service_area_stats)
-
-    # Remove rows with invalid distances
-    service_stats_df = service_stats_df.dropna(subset=["distance_to_depot_km"])
-    print(f"Valid distance calculations: {len(service_stats_df)}")
-
-
-    # Analyze depot performance
-    depot_performance = (
-        service_stats_df.groupby("depot_id")
-        .agg(
-            {
-                "distance_to_depot_km": ["mean", "max", "std"],
-                "county_risk": ["sum", "mean", "count"],
-                "county_fips": "count",
-            }
-        )
-        .round(2)
-    )
-
-    depot_performance.columns = ["_".join(col).strip() for col in depot_performance.columns]
-    depot_performance = depot_performance.reset_index()
-
-    print("\nDepot Performance Analysis:")
-    print(depot_performance)
-
-    # Step 6: Save depot results to database
-    print("\nSaving depot placement results to database...")
-
     # Save depot locations
     dbt.load_data(depot_df, "strategic_depot_locations", if_exists="replace")
 
-    # Save county assignments
+    # Save county assignments to show ovreall clusters
     county_assignments = county_data_clean[["county_fips", "depot_service_area"]].copy()
     county_assignments.rename(columns={"depot_service_area": "depot_id"}, inplace=True)
     dbt.load_data(county_assignments, "county_depot_assignments", if_exists="replace")
-
-    # Save detailed service statistics
-    dbt.load_data(service_stats_df, "depot_service_statistics", if_exists="replace")
 
     # Create spatial table for QGIS mapping
     create_depot_spatial_sql = """
@@ -600,11 +473,10 @@ if __name__ == "__main__":
     SELECT 
         c.county_fips,
         c.depot_id,
-        s.distance_to_depot_km,
-        s.county_risk,
+        r.expected_annual_loss as county_risk,
         g.geometry
     FROM county_depot_assignments c
-    JOIN depot_service_statistics s ON c.county_fips = s.county_fips
+    JOIN disaster_risk_clusters r ON c.county_fips = r.county_fips
     JOIN disaster_risk_counties_spatial_corrected g ON c.county_fips = g.county_fips;
 
     -- Add spatial index
@@ -632,38 +504,19 @@ if __name__ == "__main__":
         s.county_fips,
         s.geometry,
         -- Poisson frequency component
-        p.lambda_hat_rounded as poisson_frequency,
-        p.prob_at_least_one_event,
-        p.total_events,
-        p.years_observed,
+        s.lambda_hat_rounded as poisson_frequency,
+        s.prob_at_least_one_event,
+        s.total_events,
+        s.years_observed,
         -- Compound risk metrics
         c.expected_annual_loss as compound_risk,
         c.var_95 as risk_95th_percentile,
         c.var_99 as risk_99th_percentile,
         c.std_dev as risk_std_dev,
         -- Severity component (constant across all counties from fitted distribution)
-        {} as expected_severity,
-        -- Risk ratios and rankings
-        PERCENT_RANK() OVER (ORDER BY c.expected_annual_loss) as risk_percentile_rank,
-        NTILE(10) OVER (ORDER BY c.expected_annual_loss) as risk_decile,
-        CASE 
-            WHEN c.expected_annual_loss >= (SELECT PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY expected_annual_loss) FROM disaster_risk_clusters) THEN 'Very High'
-            WHEN c.expected_annual_loss >= (SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY expected_annual_loss) FROM disaster_risk_clusters) THEN 'High'
-            WHEN c.expected_annual_loss >= (SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY expected_annual_loss) FROM disaster_risk_clusters) THEN 'Medium'
-            WHEN c.expected_annual_loss >= (SELECT PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY expected_annual_loss) FROM disaster_risk_clusters) THEN 'Low'
-            ELSE 'Very Low'
-        END as risk_category
+        {} as expected_severity
     FROM disaster_risk_counties_spatial_corrected s
     JOIN disaster_risk_clusters c ON s.county_fips = c.county_fips
-    LEFT JOIN (
-        SELECT 
-            county_fips,
-            lambda_hat_rounded,
-            prob_at_least_one_event,
-            total_events,
-            years_observed
-        FROM disaster_risk_counties_spatial_corrected
-    ) p ON s.county_fips = p.county_fips
     WHERE s.geometry IS NOT NULL;
 
     -- Add spatial index
@@ -682,7 +535,7 @@ if __name__ == "__main__":
     print("  - Poisson frequency (lambda_hat)")
     print("  - Expected Weibull severity (constant)")
     print("  - Compound Poisson risk (expected_annual_loss)")
-    print("  - Risk percentiles and categories")
+    print("  - Risk percentiles for QGIS analysis")
     print("  - Spatial geometries for QGIS mapping")
 
     '''
@@ -732,30 +585,8 @@ if __name__ == "__main__":
     plt.grid(True, alpha=0.3)
     plt.show()
 
-    # Step 8: Risk vs Distance Analysis
-    plt.figure(figsize=(12, 8))
-    for depot_id in range(n_depots):
-        depot_data = service_stats_df[service_stats_df["depot_id"] == depot_id]
-        plt.scatter(
-            depot_data["distance_to_depot_km"],
-            depot_data["county_risk"],
-            label=f"Depot {depot_id}",
-            alpha=0.7,
-        )
-
-    plt.xlabel("Distance to Depot (km)")
-    plt.ylabel("County Risk Level")
-    plt.title("Risk vs Distance Analysis by Service Area")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.show()
-
     print("\nModel Summary:")
     print(f"- Created {n_depots} strategic depot locations")
-    print(
-        f"- Average service radius: {service_stats_df['distance_to_depot_km'].mean():.1f} km"
-    )
-    print(
-        f"- Maximum service distance: {service_stats_df['distance_to_depot_km'].max():.1f} km"
-    )
     print(f"- Total counties served: {len(county_data_clean)}")
+    print(f"- Average counties per depot: {len(county_data_clean) / n_depots:.1f}")
+    print(f"- Total risk served: {county_data_clean['expected_annual_loss'].sum():.2f}")
