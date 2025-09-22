@@ -1,5 +1,5 @@
 # import libraries
-# NOTE: global_vars should be edited to include local paths and credentials before use.
+# NOTE: global_vars should be edited to include local paths and credentials before use. See README for details.
 # If global_vars.py is created in the root dir remove the ignore/ prefix in the import statement below.
 import os
 import re

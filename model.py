@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 from scipy.stats import weibull_min
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-from geopy.distance import geodesic
 import db_tools as dbt
 
 # NOTE: Model variables
@@ -57,7 +56,6 @@ if __name__ == "__main__":
     ].copy()
 
     # calculate the probability of at least one event in a year
-    # P(≥1 disaster) = 1 - e^(-λ)
     poisson_risk_params["prob_at_least_one_event"] = 1 - np.exp(
         -poisson_risk_params["lambda_hat"]
     )
@@ -72,7 +70,7 @@ if __name__ == "__main__":
     ]
     
     try:
-        # Use the reusable function to prepare spatial data
+        # Use function to prepare spatial data for QGIS mapping
         lambda_map_clean, db_data = dbt.prepare_spatial_data_for_qgis(
             dataframe=poisson_risk_params,
             geometry_source='nri_shapefile',
@@ -148,7 +146,7 @@ if __name__ == "__main__":
         pivot_columns.append(
             f"SUM(CASE WHEN \"EVENT_TYPE\" = '{event_type}' THEN event_count ELSE 0 END) as {safe_name}_severe"
         )
-
+    # Create the pivot table
     pivot_sql = f"""
     WITH severe_events AS (
         SELECT 
@@ -178,7 +176,7 @@ if __name__ == "__main__":
     LEFT JOIN pivoted_events p ON s.county_fips = p.county_fips
     ORDER BY s.county_fips;
     """
-
+    # Create the disasters_type_county table for county level event details. Not included in main model but useful for future analysis
     create_enhanced_table_sql = f"""
     DROP TABLE IF EXISTS disasters_type_county;
 
@@ -218,7 +216,7 @@ if __name__ == "__main__":
 
     # Perform left join to keep all NOAA data. strip state FIPS for averaging later
     noaa_census_full = df_noaa_episodes.merge(
-        df_census, left_on="county_fips", right_on="County_fips", how="left"
+        df_census, left_on="county_fips", right_on="County_fips", how="left" # NOTE: I messed up earlier and called the df_census col 'County_fips' instead of 'county_fips', too late to go back if you value your sanity keep it as it is here :/
     )
     noaa_census_full["state_fips"] = noaa_census_full["county_fips"].str[:2]
 
@@ -260,7 +258,7 @@ if __name__ == "__main__":
         + noaa_census_full["total_injuries_indirect"]
         + noaa_census_full["total_deaths_indirect"]
     )
-
+    # calculate casualty rate per 1000 people
     noaa_census_full["casualty_rate"] = (
         noaa_census_full["casualties"] / noaa_census_full["POPUNI"] * 1000
     )
@@ -268,6 +266,7 @@ if __name__ == "__main__":
     noaa_census_full["vulnerability_rate"] = (
         noaa_census_full["PRED12_PE_imputed"] + noaa_census_full["PRED3_PE_imputed"]
     )
+    # intensity = casualty_rate * (1 + (vulnerability_rate / 100))
     noaa_census_full["intensity"] = noaa_census_full["casualty_rate"] * (
         1 + (noaa_census_full["vulnerability_rate"] / 100)
     )
@@ -342,7 +341,7 @@ if __name__ == "__main__":
     print(f"Created disaster_risk_clusters table with {len(county_risk_df)} counties")
 
     # coordinates are EPSG:3857 but stored with wrong SRID
-    # transforming to WGS84
+    # transforming to WGS84 to make it work in QGIS
     fix_coordinates_sql = """
     DROP TABLE IF EXISTS disaster_risk_counties_spatial_corrected;
     CREATE TABLE disaster_risk_counties_spatial_corrected AS
@@ -392,20 +391,21 @@ if __name__ == "__main__":
         & county_data["latitude"].notna()
         & county_data["longitude"].notna()
     )
-
+    # create a cleaned dataframe for clustering
     county_data_clean = county_data[valid_coords].copy()
     print(f"After cleaning: {len(county_data_clean)} counties with valid coordinates")
 
-    # Geographic clustering for depot placement (pure geography)
+    # Geographic clustering for depot placement
     geo_features = county_data_clean[["latitude", "longitude"]].values
     geo_scaler = StandardScaler()
     geo_features_scaled = geo_scaler.fit_transform(geo_features)
 
-    # set clusters are run, set at top with n_depots = 
+    # set clusters are run, set var at top with n_depots = 
+    # NOTE: future implementation should ask for user prompt for n_depots?
     geo_kmeans = KMeans(n_clusters=n_depots, random_state=36, n_init=10)
     county_data_clean["depot_service_area"] = geo_kmeans.fit_predict(geo_features_scaled)
 
-    # Step 3: Calculate depot locations (centroids of service areas)
+    # Step 3: Calculate depot locations
     depot_locations = []
     for depot_id in range(n_depots):
         service_counties = county_data_clean[
@@ -424,7 +424,7 @@ if __name__ == "__main__":
         else:
             weighted_lat = service_counties["latitude"].mean()
             weighted_lon = service_counties["longitude"].mean()
-
+        # Append depot info
         depot_locations.append(
             {
                 "depot_id": depot_id,
@@ -540,6 +540,7 @@ if __name__ == "__main__":
 
     '''
     Plotting and Summary for diagnostics
+    Use QGIS for detailed spatial analysis using tables created above
 
     '''
 
@@ -590,3 +591,5 @@ if __name__ == "__main__":
     print(f"- Total counties served: {len(county_data_clean)}")
     print(f"- Average counties per depot: {len(county_data_clean) / n_depots:.1f}")
     print(f"- Total risk served: {county_data_clean['expected_annual_loss'].sum():.2f}")
+
+    
