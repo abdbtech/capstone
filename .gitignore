@@ -6,3 +6,4 @@ __pycache__/
 qgis_exports/
 .github/
 notebooks/
+*.code-workspace
