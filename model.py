@@ -16,11 +16,12 @@ n_depots = 36  # Set number of depots for clustering analysis
 if __name__ == "__main__":
 
     '''
-    NRI Shapefile ETL
+    Poisson Frequency Component
     '''
+
     print("Starting modeling process...")
 
-    # Load the NOAA data into a DataFrame for analysis
+    # Load the NOAA data into a DataFrame
     df_noaa = dbt.query("SELECT * FROM \"NOAA_STORM_EPISODES\" ORDER BY county_fips, year")
 
     # get summary statistics for each county. Group by county_fips
@@ -69,6 +70,10 @@ if __name__ == "__main__":
         "prob_at_least_one_event"
     ]
     
+    '''
+    NRI Shapefile ETL
+    '''
+
     try:
         # Use function to prepare spatial data for QGIS mapping
         lambda_map_clean, db_data = dbt.prepare_spatial_data_for_qgis(
@@ -262,7 +267,6 @@ if __name__ == "__main__":
     noaa_census_full["casualty_rate"] = (
         noaa_census_full["casualties"] / noaa_census_full["POPUNI"] * 1000
     )
-    # label is misleading, PRED12_PE_imputed and PRED3_PE_imputed are an aggegate of actual PRED data and imputed data from counties missing these metric. 
     noaa_census_full["vulnerability_rate"] = (
         noaa_census_full["PRED12_PE_imputed"] + noaa_census_full["PRED3_PE_imputed"]
     )
@@ -297,10 +301,10 @@ if __name__ == "__main__":
         # Simulate total risk for each year
         total_risks = []
         for _ in range(n_simulations):
-            # Step 1: Generate number of events N ~ Poisson(λ)
+            # Generate number of events N ~ Poisson(λ)
             n_events = np.random.poisson(lambda_i)
 
-            # Step 2: Generate severity for each event Y ~ Weibull
+            # Generate severity for each event Y ~ Weibull
             if n_events > 0:
                 severities = weibull_min.rvs(
                     weibull_shape, loc=weibull_loc, scale=weibull_scale, size=n_events
@@ -317,9 +321,6 @@ if __name__ == "__main__":
     county_risks = {}
     for county in tqdm.tqdm(poisson_risk_params["county_fips"]):
         county_risks[county] = simulate_compound_poisson_risk(county)
-
-    # Create disaster_risk_clusters table from county_risks simulation results
-    print("Creating disaster_risk_clusters table from simulation results...")
 
     # Convert county_risks dictionary to DataFrame
     risk_data = []
@@ -393,7 +394,11 @@ if __name__ == "__main__":
     )
     # create a cleaned dataframe for clustering
     county_data_clean = county_data[valid_coords].copy()
-    print(f"After cleaning: {len(county_data_clean)} counties with valid coordinates")
+    
+    # Filter out Alaska (02) and Hawaii (15) - focus on contiguous US
+    county_data_clean = county_data_clean[
+        ~county_data_clean['county_fips'].str.startswith(('02', '15'))
+    ].copy()
 
     # Geographic clustering for depot placement
     geo_features = county_data_clean[["latitude", "longitude"]].values
@@ -531,12 +536,177 @@ if __name__ == "__main__":
     # Execute the SQL
     dbt.execute_sql(compound_poisson_map_sql)
 
+    # Impute missing counties with national average
+    impute_missing_sql = """
+    WITH national_averages AS (
+        SELECT 
+            AVG(poisson_frequency) as avg_frequency,
+            AVG(prob_at_least_one_event) as avg_prob,
+            AVG(compound_risk) as avg_risk,
+            AVG(risk_95th_percentile) as avg_var95,
+            AVG(risk_99th_percentile) as avg_var99,
+            AVG(risk_std_dev) as avg_std
+        FROM compound_poisson_map
+    ),
+    missing_counties AS (
+        SELECT DISTINCT
+            s.county_fips,
+            s.geometry
+        FROM disaster_risk_counties_spatial_corrected s
+        LEFT JOIN compound_poisson_map c ON s.county_fips = c.county_fips
+        WHERE c.county_fips IS NULL AND s.geometry IS NOT NULL
+    )
+    INSERT INTO compound_poisson_map (
+        county_fips, geometry, poisson_frequency, prob_at_least_one_event,
+        total_events, years_observed, compound_risk, risk_95th_percentile,
+        risk_99th_percentile, risk_std_dev, expected_severity
+    )
+    SELECT 
+        m.county_fips,
+        m.geometry,
+        n.avg_frequency,
+        n.avg_prob,
+        0,
+        0,
+        n.avg_risk,
+        n.avg_var95,
+        n.avg_var99,
+        n.avg_std,
+        {}
+    FROM missing_counties m
+    CROSS JOIN national_averages n;
+    """.format(expected_severity)
+    
+    dbt.execute_sql(impute_missing_sql)
+
     print("✓ Created compound_poisson_map table with:")
     print("  - Poisson frequency (lambda_hat)")
     print("  - Expected Weibull severity (constant)")
     print("  - Compound Poisson risk (expected_annual_loss)")
     print("  - Risk percentiles for QGIS analysis")
     print("  - Spatial geometries for QGIS mapping")
+
+    '''
+    Clustering Evaluation: Silhouette Score & Gini Coefficient
+    '''
+
+    from sklearn.metrics import silhouette_score
+
+    # Calculate silhouette score for geographic clustering
+    geo_silhouette = silhouette_score(geo_features_scaled, county_data_clean["depot_service_area"])
+    
+    # Create risk-weighted clustering for comparison
+    risk_geo_features = county_data_clean[["latitude", "longitude", "expected_annual_loss"]].values
+    risk_geo_scaler = StandardScaler()
+    risk_geo_features_scaled = risk_geo_scaler.fit_transform(risk_geo_features)
+    
+    risk_kmeans = KMeans(n_clusters=n_depots, random_state=36, n_init=10)
+    county_data_clean["risk_weighted_cluster"] = risk_kmeans.fit_predict(risk_geo_features_scaled)
+    
+    # Calculate silhouette score for risk-weighted clustering (using geographic features for fair comparison)
+    risk_weighted_silhouette = silhouette_score(geo_features_scaled, county_data_clean["risk_weighted_cluster"])
+    
+    print("\n" + "=" * 70)
+    print("Clustering Quality: Silhouette Score Analysis")
+    print("=" * 70)
+    print(f"Geographic-only clustering silhouette:    {geo_silhouette:.4f}")
+    print(f"Risk-weighted clustering silhouette:      {risk_weighted_silhouette:.4f}")
+    print(f"Difference:                               {abs(geo_silhouette - risk_weighted_silhouette):.4f}")
+    print("\nInterpretation: Silhouette scores range from -1 to 1")
+    print("  Higher values indicate better-defined, more separated clusters")
+    
+    # Gini coefficient function
+    def gini_coefficient(values):
+        """Calculate Gini coefficient for inequality measurement"""
+        sorted_values = np.sort(values)
+        n = len(values)
+        cumsum = np.cumsum(sorted_values)
+        return (2 * np.sum((np.arange(1, n + 1)) * sorted_values)) / (n * cumsum[-1]) - (n + 1) / n
+    
+    # Lorenz curve calculation function
+    def lorenz_curve(values):
+        """Calculate Lorenz curve coordinates for plotting"""
+        sorted_values = np.sort(values)
+        cumsum = np.cumsum(sorted_values)
+        cumsum_pct = cumsum / cumsum[-1]
+        pop_pct = np.arange(1, len(values) + 1) / len(values)
+        return pop_pct, cumsum_pct
+    
+    # Calculate risk distribution for geographic clustering
+    geo_risk_by_depot = county_data_clean.groupby("depot_service_area")["expected_annual_loss"].sum().values
+    geo_gini = gini_coefficient(geo_risk_by_depot)
+    geo_pop_pct, geo_cumsum_pct = lorenz_curve(geo_risk_by_depot)
+    
+    # Calculate risk distribution for risk-weighted clustering
+    risk_weighted_risk_by_depot = county_data_clean.groupby("risk_weighted_cluster")["expected_annual_loss"].sum().values
+    risk_weighted_gini = gini_coefficient(risk_weighted_risk_by_depot)
+    risk_pop_pct, risk_cumsum_pct = lorenz_curve(risk_weighted_risk_by_depot)
+    
+    print("\n" + "=" * 70)
+    print("Risk Distribution Equity: Gini Coefficient Analysis")
+    print("=" * 70)
+    print(f"Geographic-only clustering Gini:          {geo_gini:.4f}")
+    print(f"Risk-weighted clustering Gini:            {risk_weighted_gini:.4f}")
+    print(f"Difference:                               {abs(geo_gini - risk_weighted_gini):.4f}")
+    print(f"Improvement:                              {((geo_gini - risk_weighted_gini) / geo_gini * 100):.2f}%")
+    print("\nInterpretation: Gini coefficient ranges from 0 to 1")
+    print("  0 = Perfect equality (all depots serve equal risk)")
+    print("  1 = Perfect inequality (one depot serves all risk)")
+    print("  Lower Gini indicates more equitable risk distribution")
+    
+    if risk_weighted_gini < geo_gini:
+        print("\n✓ Risk-weighted clustering achieves MORE equitable risk distribution")
+    else:
+        print("\n✗ Geographic-only clustering has more equitable risk distribution")
+    
+    # Kolmogorov-Smirnov test for statistical significance
+    from scipy.stats import ks_2samp
+    
+    ks_statistic, ks_pvalue = ks_2samp(geo_risk_by_depot, risk_weighted_risk_by_depot)
+    
+    print("\n" + "=" * 70)
+    print("Statistical Significance: Kolmogorov-Smirnov Test")
+    print("=" * 70)
+    print(f"KS Test Statistic:                        {ks_statistic:.4f}")
+    print(f"P-value:                                  {ks_pvalue:.4f}")
+    print("\nInterpretation:")
+    if ks_pvalue < 0.001:
+        print("  *** Highly significant difference (p < 0.001)")
+    elif ks_pvalue < 0.01:
+        print("  ** Very significant difference (p < 0.01)")
+    elif ks_pvalue < 0.05:
+        print("  * Significant difference (p < 0.05)")
+    else:
+        print("  No significant difference (p >= 0.05)")
+    print("  The distributions are statistically" + (" DIFFERENT" if ks_pvalue < 0.05 else " SIMILAR"))
+    
+    # Plot Lorenz Curves
+    plt.figure(figsize=(10, 8))
+    
+    # Plot perfect equality line
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=2, label='Perfect Equality', alpha=0.5)
+    
+    # Plot Lorenz curves
+    plt.plot(geo_pop_pct, geo_cumsum_pct, linewidth=2.5, 
+             label=f'Geographic-Only (Gini={geo_gini:.4f})', color='blue')
+    plt.plot(risk_pop_pct, risk_cumsum_pct, linewidth=2.5, 
+             label=f'Risk-Weighted (Gini={risk_weighted_gini:.4f})', color='green')
+    
+    # Fill areas under curves
+    plt.fill_between(geo_pop_pct, geo_cumsum_pct, alpha=0.2, color='blue')
+    plt.fill_between(risk_pop_pct, risk_cumsum_pct, alpha=0.2, color='green')
+    
+    plt.xlabel('Cumulative Proportion of Depots', fontsize=12)
+    plt.ylabel('Cumulative Proportion of Risk', fontsize=12)
+    plt.title('Lorenz Curves: Risk Distribution Equity Comparison', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=11, loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.show()
+    
+    print("\n" + "=" * 70)
 
     '''
     Plotting and Summary for diagnostics
@@ -592,4 +762,3 @@ if __name__ == "__main__":
     print(f"- Average counties per depot: {len(county_data_clean) / n_depots:.1f}")
     print(f"- Total risk served: {county_data_clean['expected_annual_loss'].sum():.2f}")
 
-    

@@ -5,3 +5,4 @@ __pycache__/
 .env
 qgis_exports/
 .github/
+notebooks/
