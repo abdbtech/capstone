@@ -9,6 +9,7 @@ from scipy.stats import weibull_min
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import db_tools as dbt
+from scipy.stats import ks_2samp
 
 # NOTE: Model variables
 n_depots = 36  # Set number of depots for clustering analysis
@@ -18,9 +19,6 @@ if __name__ == "__main__":
     '''
     Poisson Frequency Component
     '''
-
-    print("Starting modeling process...")
-
     # Load the NOAA data into a DataFrame
     df_noaa = dbt.query("SELECT * FROM \"NOAA_STORM_EPISODES\" ORDER BY county_fips, year")
 
@@ -32,7 +30,6 @@ if __name__ == "__main__":
         )
         .round(4)
     )
-
     # Flatten column names
     county_lambdas.columns = ["_".join(col).strip() for col in county_lambdas.columns]
     county_lambdas = county_lambdas.reset_index()
@@ -60,7 +57,6 @@ if __name__ == "__main__":
     poisson_risk_params["prob_at_least_one_event"] = 1 - np.exp(
         -poisson_risk_params["lambda_hat"]
     )
-
     # Define the columns
     risk_columns = [
         "county_fips",
@@ -69,11 +65,9 @@ if __name__ == "__main__":
         "years_observed",
         "prob_at_least_one_event"
     ]
-    
     '''
     NRI Shapefile ETL
     '''
-
     try:
         # Use function to prepare spatial data for QGIS mapping
         lambda_map_clean, db_data = dbt.prepare_spatial_data_for_qgis(
@@ -84,13 +78,10 @@ if __name__ == "__main__":
             impute_missing=True,
             add_rounded_cols=True
         )
-        
         # Save to database
-        print("Saving spatial data to database...")
         dbt.load_data(db_data, "disaster_risk_spatial", if_exists="replace")
         
         # Create spatial table with PostGIS geometry
-        print("Creating PostGIS spatial table...")
         spatial_table_sql = """
         DROP TABLE IF EXISTS disaster_risk_counties_spatial;
 
@@ -112,7 +103,6 @@ if __name__ == "__main__":
         ALTER TABLE disaster_risk_counties_spatial 
         ADD CONSTRAINT pk_disaster_risk_counties_spatial PRIMARY KEY (county_fips);
         """
-        
         dbt.execute_sql(spatial_table_sql)
         print("Spatial database table created: disaster_risk_counties_spatial")
 
@@ -122,19 +112,17 @@ if __name__ == "__main__":
 
     """
     Table for disaster count by type by county, used for QGIS overlay
+    
+    Create table with event counts per county
+    This table is used for troubleshooting and future functionality
+    or for county level historical disaster exploration
     """
-
-    # Create table with event counts per county
-    # This table is used for troubleshooting and future functionality
-    # or for county level historical disaster exploration
-
     event_types_sql = """
     SELECT DISTINCT "EVENT_TYPE" 
     FROM "NOAA_STORM_EVENTS" 
     WHERE ("INJURIES_DIRECT" > 0 OR "DEATHS_DIRECT" > 0)
     ORDER BY "EVENT_TYPE";
     """
-
     event_types = dbt.query(event_types_sql)
     # Build dynamic pivot columns
     pivot_columns = []
@@ -181,7 +169,8 @@ if __name__ == "__main__":
     LEFT JOIN pivoted_events p ON s.county_fips = p.county_fips
     ORDER BY s.county_fips;
     """
-    # Create the disasters_type_county table for county level event details. Not included in main model but useful for future analysis
+    # Create the disasters_type_county table for county level event details. 
+    # NOTE: Not included in main model but useful for future analysis
     create_enhanced_table_sql = f"""
     DROP TABLE IF EXISTS disasters_type_county;
 
@@ -192,15 +181,10 @@ if __name__ == "__main__":
     CREATE INDEX idx_disaster_risk_event_counts_geom ON disasters_type_county USING GIST (geometry);
     ALTER TABLE disasters_type_county ADD CONSTRAINT pk_disaster_risk_event_counts PRIMARY KEY (county_fips);
     """
-
     dbt.execute_sql(create_enhanced_table_sql)
-    print("Enhanced table created: disasters_type_county")
-
-
     '''
     Weibull Severity component
     '''
-
     # Load tables from database
     df_noaa_episodes = dbt.query('SELECT * FROM "NOAA_STORM_EPISODES"')
     df_census = dbt.query('SELECT * FROM "census_resilience"')
@@ -212,7 +196,6 @@ if __name__ == "__main__":
         + df_noaa_episodes["total_injuries_indirect"]
         + df_noaa_episodes["total_deaths_indirect"]
     )
-
     # Calculate state averages for vulnerability imputation
     df_census["state_fips"] = df_census["County_fips"].str[:2]
     state_vulnerability_avg = df_census.groupby("state_fips")[
@@ -221,14 +204,14 @@ if __name__ == "__main__":
 
     # Perform left join to keep all NOAA data. strip state FIPS for averaging later
     noaa_census_full = df_noaa_episodes.merge(
-        df_census, left_on="county_fips", right_on="County_fips", how="left" # NOTE: I messed up earlier and called the df_census col 'County_fips' instead of 'county_fips', too late to go back if you value your sanity keep it as it is here :/
+        df_census, left_on="county_fips", right_on="County_fips", how="left" 
+        # NOTE: I messed up earlier and called the df_census col 'County_fips' instead of 'county_fips', too late to go back if you value your sanity keep it as it is here :/
     )
     noaa_census_full["state_fips"] = noaa_census_full["county_fips"].str[:2]
 
     # Impute missing vulnerability data using state averages
     # First, create a mapping of state averages
     state_avg_mapping = state_vulnerability_avg.to_dict()
-
 
     # Function to impute missing values
     def impute_vulnerability(row, vulnerability_col, state_col="state_fips"):
@@ -241,7 +224,6 @@ if __name__ == "__main__":
                 return df_census[vulnerability_col].mean()
         return row[vulnerability_col]
 
-
     # Apply imputation
     noaa_census_full["PRED12_PE_imputed"] = noaa_census_full.apply(
         lambda row: impute_vulnerability(row, "PRED12_PE"), axis=1
@@ -249,12 +231,9 @@ if __name__ == "__main__":
     noaa_census_full["PRED3_PE_imputed"] = noaa_census_full.apply(
         lambda row: impute_vulnerability(row, "PRED3_PE"), axis=1
     )
-
     # Recalculate intensity with imputed vulnerability data
     # Filter out counties with missing population data instead of imputing to avoid bias
-    print(f"Before filtering: {len(noaa_census_full)} county episodes")
     noaa_census_full = noaa_census_full[noaa_census_full["POPUNI"].notna()]
-    print(f"After filtering missing population: {len(noaa_census_full)} county episodes")
 
     # Calculate casualties, casualty rate, vulnerability rate, and intensity
     noaa_census_full["casualties"] = (
@@ -282,16 +261,9 @@ if __name__ == "__main__":
     weibull_params = weibull_min.fit(intensity_data, floc=0)
     weibull_shape, weibull_loc, weibull_scale = weibull_params
 
-    # Used scipy weibull_min for modeling "min extreme value" of derived "intensity"
-    # shape: k parameter describing skewedness
-    # scale: lambda parameter for spread
-    # location: shift parameter, locked at 0 for this implementation.
-    print(f"Fitted Weibull parameters: shape={weibull_shape:.4f}, scale={weibull_scale:.4f}, location={weibull_loc:.4f}")
-
     '''
     Compound Model Integration and Poisson calculation
     '''
-
     def simulate_compound_poisson_risk(county_fips, n_simulations=10000):
         # Get county's λ (frequency)
         lambda_i = poisson_risk_params[poisson_risk_params["county_fips"] == county_fips][
@@ -312,9 +284,7 @@ if __name__ == "__main__":
                 total_risk = np.sum(severities)
             else:
                 total_risk = 0
-
             total_risks.append(total_risk)
-
         return np.array(total_risks)
     
     # Apply to all counties
@@ -334,7 +304,6 @@ if __name__ == "__main__":
                 "std_dev": np.std(risk_array),
             }
         )
-
     county_risk_df = pd.DataFrame(risk_data)
 
     # Save to database
@@ -342,7 +311,7 @@ if __name__ == "__main__":
     print(f"Created disaster_risk_clusters table with {len(county_risk_df)} counties")
 
     # coordinates are EPSG:3857 but stored with wrong SRID
-    # transforming to WGS84 to make it work in QGIS
+    # transform to WGS84 to make it work in QGIS
     fix_coordinates_sql = """
     DROP TABLE IF EXISTS disaster_risk_counties_spatial_corrected;
     CREATE TABLE disaster_risk_counties_spatial_corrected AS
@@ -361,10 +330,8 @@ if __name__ == "__main__":
     ALTER TABLE disaster_risk_counties_spatial_corrected 
     ADD CONSTRAINT pk_disaster_risk_counties_spatial_corrected PRIMARY KEY (county_fips);
     """
-
-    # extract county centroids and risk data with correctly formatted coordinates
+    # extract county centroids and risk data
     dbt.execute_sql(fix_coordinates_sql)
-
     county_geo_risk_query = """
     SELECT 
         s.county_fips,
@@ -378,11 +345,9 @@ if __name__ == "__main__":
     WHERE s.geometry IS NOT NULL
     ORDER BY s.county_fips
     """
-
     # load counties including geographic and risk data
     county_data = dbt.query(county_geo_risk_query)
     print(f"Loaded {len(county_data)} counties with geographic and risk data")
-
     # Filter out invalid coordinates
     valid_coords = (
         (county_data["latitude"] >= -90)
@@ -416,7 +381,6 @@ if __name__ == "__main__":
         service_counties = county_data_clean[
             county_data_clean["depot_service_area"] == depot_id
         ]
-
         # Weighted centroid based on risk levels
         total_risk = service_counties["expected_annual_loss"].sum()
         if total_risk > 0:
@@ -488,9 +452,7 @@ if __name__ == "__main__":
     CREATE INDEX idx_county_service_areas_spatial_geom 
     ON county_service_areas_spatial USING GIST (geometry);
     """
-
     dbt.execute_sql(create_depot_spatial_sql)
-
     '''
     Create compound_poisson_map table for comprehensive risk metrics
     '''
@@ -579,19 +541,10 @@ if __name__ == "__main__":
     
     dbt.execute_sql(impute_missing_sql)
 
-    print("✓ Created compound_poisson_map table with:")
-    print("  - Poisson frequency (lambda_hat)")
-    print("  - Expected Weibull severity (constant)")
-    print("  - Compound Poisson risk (expected_annual_loss)")
-    print("  - Risk percentiles for QGIS analysis")
-    print("  - Spatial geometries for QGIS mapping")
-
     '''
     Clustering Evaluation: Silhouette Score & Gini Coefficient
     '''
-
     from sklearn.metrics import silhouette_score
-
     # Calculate silhouette score for geographic clustering
     geo_silhouette = silhouette_score(geo_features_scaled, county_data_clean["depot_service_area"])
     
@@ -599,21 +552,15 @@ if __name__ == "__main__":
     risk_geo_features = county_data_clean[["latitude", "longitude", "expected_annual_loss"]].values
     risk_geo_scaler = StandardScaler()
     risk_geo_features_scaled = risk_geo_scaler.fit_transform(risk_geo_features)
-    
     risk_kmeans = KMeans(n_clusters=n_depots, random_state=36, n_init=10)
     county_data_clean["risk_weighted_cluster"] = risk_kmeans.fit_predict(risk_geo_features_scaled)
     
     # Calculate silhouette score for risk-weighted clustering (using geographic features for fair comparison)
     risk_weighted_silhouette = silhouette_score(geo_features_scaled, county_data_clean["risk_weighted_cluster"])
-    
-    print("\n" + "=" * 70)
-    print("Clustering Quality: Silhouette Score Analysis")
-    print("=" * 70)
+
     print(f"Geographic-only clustering silhouette:    {geo_silhouette:.4f}")
     print(f"Risk-weighted clustering silhouette:      {risk_weighted_silhouette:.4f}")
     print(f"Difference:                               {abs(geo_silhouette - risk_weighted_silhouette):.4f}")
-    print("\nInterpretation: Silhouette scores range from -1 to 1")
-    print("  Higher values indicate better-defined, more separated clusters")
     
     # Gini coefficient function
     def gini_coefficient(values):
@@ -641,45 +588,16 @@ if __name__ == "__main__":
     risk_weighted_risk_by_depot = county_data_clean.groupby("risk_weighted_cluster")["expected_annual_loss"].sum().values
     risk_weighted_gini = gini_coefficient(risk_weighted_risk_by_depot)
     risk_pop_pct, risk_cumsum_pct = lorenz_curve(risk_weighted_risk_by_depot)
-    
-    print("\n" + "=" * 70)
-    print("Risk Distribution Equity: Gini Coefficient Analysis")
-    print("=" * 70)
+
     print(f"Geographic-only clustering Gini:          {geo_gini:.4f}")
     print(f"Risk-weighted clustering Gini:            {risk_weighted_gini:.4f}")
-    print(f"Difference:                               {abs(geo_gini - risk_weighted_gini):.4f}")
-    print(f"Improvement:                              {((geo_gini - risk_weighted_gini) / geo_gini * 100):.2f}%")
-    print("\nInterpretation: Gini coefficient ranges from 0 to 1")
-    print("  0 = Perfect equality (all depots serve equal risk)")
-    print("  1 = Perfect inequality (one depot serves all risk)")
-    print("  Lower Gini indicates more equitable risk distribution")
-    
-    if risk_weighted_gini < geo_gini:
-        print("\n✓ Risk-weighted clustering achieves MORE equitable risk distribution")
-    else:
-        print("\n✗ Geographic-only clustering has more equitable risk distribution")
     
     # Kolmogorov-Smirnov test for statistical significance
-    from scipy.stats import ks_2samp
-    
     ks_statistic, ks_pvalue = ks_2samp(geo_risk_by_depot, risk_weighted_risk_by_depot)
-    
-    print("\n" + "=" * 70)
     print("Statistical Significance: Kolmogorov-Smirnov Test")
-    print("=" * 70)
     print(f"KS Test Statistic:                        {ks_statistic:.4f}")
     print(f"P-value:                                  {ks_pvalue:.4f}")
-    print("\nInterpretation:")
-    if ks_pvalue < 0.001:
-        print("  *** Highly significant difference (p < 0.001)")
-    elif ks_pvalue < 0.01:
-        print("  ** Very significant difference (p < 0.01)")
-    elif ks_pvalue < 0.05:
-        print("  * Significant difference (p < 0.05)")
-    else:
-        print("  No significant difference (p >= 0.05)")
-    print("  The distributions are statistically" + (" DIFFERENT" if ks_pvalue < 0.05 else " SIMILAR"))
-    
+
     # Plot Lorenz Curves
     plt.figure(figsize=(10, 8))
     
@@ -705,7 +623,6 @@ if __name__ == "__main__":
     plt.ylim(0, 1)
     plt.tight_layout()
     plt.show()
-    
     print("\n" + "=" * 70)
 
     '''
@@ -713,10 +630,8 @@ if __name__ == "__main__":
     Use QGIS for detailed spatial analysis using tables created above
 
     '''
-
     # Plot counties colored by service area
     plt.figure(figsize=(15, 10))
-
     scatter = plt.scatter(
         county_data_clean["longitude"],
         county_data_clean["latitude"],
@@ -725,7 +640,6 @@ if __name__ == "__main__":
         alpha=0.6,
         s=30,
     )
-
     # Plot depot locations
     plt.scatter(
         depot_df["longitude"],
@@ -737,7 +651,6 @@ if __name__ == "__main__":
         linewidth=2,
         label="Depot Locations",
     )
-
     # Annotate depot IDs
     for _, depot in depot_df.iterrows():
         plt.annotate(
@@ -747,7 +660,6 @@ if __name__ == "__main__":
             textcoords="offset points",
             fontweight="bold",
         )
-
     plt.colorbar(scatter, label="Service Area ID")
     plt.xlabel("Longitude")
     plt.ylabel("Latitude")
@@ -755,10 +667,4 @@ if __name__ == "__main__":
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.show()
-
-    print("\nModel Summary:")
-    print(f"- Created {n_depots} strategic depot locations")
-    print(f"- Total counties served: {len(county_data_clean)}")
-    print(f"- Average counties per depot: {len(county_data_clean) / n_depots:.1f}")
-    print(f"- Total risk served: {county_data_clean['expected_annual_loss'].sum():.2f}")
 

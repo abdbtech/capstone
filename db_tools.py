@@ -1,5 +1,11 @@
+'''
+Custom database utils for Compound Poisson Process map
+These functions will likely not work with any database other than:
+PostgreSQL with PostGIS extension
 
-#database utils
+global_vars.py must be created for these to work
+See project README for more info
+'''
 import psycopg2
 from sqlalchemy import create_engine
 import pandas as pd

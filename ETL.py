@@ -9,20 +9,15 @@ import geopandas as gpd
 import ignore.global_vars as gv
 import db_tools as dbt
 
-
 if __name__ == "__main__":
-
     '''
     NRI Shapefile ETL
     '''
-
     # Database connection setup
     dbt.connection(test=True)
     dbt.engine()
-
     zip_path = gv.DATA_PATHS["nri_shapefile"]
     extract_dir = gv.DATA_PATHS["extract_dir"]
-
     os.makedirs(extract_dir, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(extract_dir)
@@ -32,16 +27,12 @@ if __name__ == "__main__":
 
     # Load shapefile
     gdf = gpd.read_file(shp_path)
-
     gdf.to_postgis(name="nri_shape_census_tracts", con=dbt.engine(), if_exists="replace")
 
     '''
     Census Data ETL
     '''
-
     df = pd.read_csv(gv.DATA_PATHS["census_resilience"], encoding='latin-1')
-
-
     # Looking at the data there are missing leading 0 in the TRACT field, instead of concatonating
     # filter so only GEO_LEVEL == 'County' remain and strip everything except the last 5 digits from GEO_ID
     # into a new column County_fips
@@ -80,13 +71,11 @@ if __name__ == "__main__":
             if 1999 <= year <= 2024:
                 selected_files.append(file)
 
-
     # Use the selected_files list
     print(f"Selected {len(selected_files)} StormEvents_details files:")
     for i, filename in enumerate(selected_files, 1):
         year = re.search(r"d(\d{4})", filename).group(1)
         print(f"{filename}")
-
 
     table_exists = dbt.query("""
         SELECT EXISTS (
@@ -113,20 +102,16 @@ if __name__ == "__main__":
             try:
                 # Construct full URL
                 full_url = base_url + filename
-
                 # Stream file to DataFrame
                 df = dbt.ftp_to_df(full_url, compression="gzip")
-
                 if not df.empty:
                     # Add year column for reference
                     year = re.search(r"d(\d{4})", filename).group(1)
                     df["FILE_YEAR"] = int(year)
-
                     all_storm_data.append(df)
                     print(f"{i:2d}/{len(selected_files)}: {year} - {len(df)} rows")
                 else:
                     print(f"{i:2d}/{len(selected_files)}: {filename} - No data")
-
             except Exception as e:
                 print(f"Error processing {filename}: {e}")
 
@@ -168,9 +153,7 @@ if __name__ == "__main__":
 
     # combine BEGIN_YEARMONTH and BEGIN_DAY into a single DATE column and convert to datetime, drop original columns
     # create YEAR column for filtering later
-
     df_all_storms_comb = df_all_storms_drop.copy()
-
     df_all_storms_comb["BEGIN_YEARMONTH"] = df_all_storms_comb["BEGIN_YEARMONTH"].astype(
         str
     )
@@ -236,7 +219,6 @@ if __name__ == "__main__":
         )
         .reset_index()
     )
-
     # Aggregate by county-year with both count and other metrics
     annual_episodes = (
         county_episodes.groupby(["CO_FIPS", "YEAR"])
@@ -312,3 +294,4 @@ if __name__ == "__main__":
     # Load cleaned data into the database
     dbt.load_data(annual_episodes, "NOAA_STORM_EPISODES", if_exists="replace")
     dbt.load_data(df_clean, "NOAA_STORM_EVENTS", if_exists="replace")
+    print('ETL process complete')
